@@ -1,191 +1,158 @@
 import { ipcMain } from 'electron';
 import { spawn } from 'child_process';
 import { mainWindow } from '../main';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 class AudioService {
-    private ffmpegProcess: any;
+    private recordProcess: any;
     private isCapturing: boolean = false;
     private audioBuffer: Buffer[] = [];
+    private tempFile: string;
 
     constructor() {
         this.audioBuffer = [];
+        this.tempFile = path.join(os.tmpdir(), 'temp_audio.wav');
+    }
+
+    private async checkSoxInstallation(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const check = spawn('which', ['rec']);
+            check.on('close', (code) => {
+                if (code !== 0) {
+                    reject(new Error('Sox is not installed. Please run: brew install sox'));
+                }
+                resolve();
+            });
+        });
     }
 
     async startCapture() {
-        if (this.isCapturing) return;
-
-        this.isCapturing = true;
-        this.audioBuffer = [];
-
-        const ffmpegPath = process.platform === 'darwin'
-            ? '/opt/homebrew/bin/ffmpeg'
-            : 'ffmpeg';
+        if (this.isCapturing) return { success: true };
 
         try {
-            // List available input devices first
-            const devices = await this.listAudioDevices();
-            console.log('Available audio devices:', devices);
+            await this.checkSoxInstallation();
 
-            // On macOS, use the default input device
-            this.ffmpegProcess = spawn(ffmpegPath, [
-                '-f', 'avfoundation',
-                '-list_devices', 'true',
-                '-i', '',
+            if (fs.existsSync(this.tempFile)) {
+                fs.unlinkSync(this.tempFile);
+            }
+
+            this.isCapturing = true;
+            this.audioBuffer = [];
+
+            // Use rec command (part of sox) for recording
+            this.recordProcess = spawn('/opt/homebrew/bin/rec', [
+                '-q',                    // Quiet mode
+                this.tempFile,           // Output file
+                'rate', '44100',         // Sample rate
+                'channels', '1',         // Mono audio
+                'gain', '-3',            // Reduce gain slightly to prevent clipping
             ]);
 
-            // Handle process events
-            this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
-                console.log('FFmpeg stdout:', data.toString());
-                this.audioBuffer.push(data);
-            });
-
-            this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
+            this.recordProcess.stderr.on('data', (data: Buffer) => {
                 const output = data.toString();
-                console.log('FFmpeg stderr:', output);
-                // This is normal for ffmpeg to output device info to stderr
-                if (!output.includes('Input/output error')) {
-                    mainWindow?.webContents.send('ffmpeg-error', output);
+                console.log('Recording stderr:', output);
+                if (output.includes('error') || output.includes('failed')) {
+                    mainWindow?.webContents.send('audio-error', output);
                 }
             });
 
-            this.ffmpegProcess.on('error', (error: Error) => {
-                console.error('FFmpeg process error:', error);
+            this.recordProcess.stdout.on('data', (data: Buffer) => {
+                console.log('Recording stdout:', data.toString());
+            });
+
+            this.recordProcess.on('error', (error: Error) => {
+                console.error('Recording process error:', error);
+                this.isCapturing = false;
+                mainWindow?.webContents.send('audio-error', error.message);
                 throw error;
             });
 
-            this.ffmpegProcess.on('close', (code: number) => {
-                console.log('FFmpeg process closed with code:', code);
+            this.recordProcess.on('close', (code: number) => {
+                console.log('Recording process closed with code:', code);
                 this.isCapturing = false;
                 if (code !== 0 && code !== null) {
-                    throw new Error(`FFmpeg process exited with code ${code}`);
+                    const error = new Error(`Recording process exited with code ${code}`);
+                    mainWindow?.webContents.send('audio-error', error.message);
+                    throw error;
                 }
             });
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            if (!this.recordProcess || this.recordProcess.killed) {
+                throw new Error('Failed to start audio capture');
+            }
 
             return { success: true };
         } catch (error: any) {
             this.isCapturing = false;
             console.error('Error in startCapture:', error);
+            mainWindow?.webContents.send('audio-error', error.message);
             throw error;
         }
-    }
-
-    private async listAudioDevices(): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const ffmpeg = spawn('/opt/homebrew/bin/ffmpeg', [
-                '-f', 'avfoundation',
-                '-list_devices', 'true',
-                '-i', ''
-            ]);
-
-            let output = '';
-
-            ffmpeg.stderr.on('data', (data) => {
-                output += data.toString();
-            });
-
-            ffmpeg.on('close', (code) => {
-                if (code === 0 || code === 255) { // 255 is normal for device listing
-                    resolve(output);
-                } else {
-                    reject(new Error(`FFmpeg exited with code ${code}`));
-                }
-            });
-
-            ffmpeg.on('error', reject);
-        });
     }
 
     stopCapture() {
         if (!this.isCapturing) return;
 
-        this.isCapturing = false;
-        if (this.ffmpegProcess) {
-            this.ffmpegProcess.kill();
-            this.ffmpegProcess = null;
+        try {
+            this.isCapturing = false;
+            if (this.recordProcess) {
+                this.recordProcess.kill('SIGTERM');
+                this.recordProcess = null;
+            }
+        } catch (error) {
+            console.error('Error stopping capture:', error);
         }
     }
 
     async playCapturedAudio() {
-        if (this.audioBuffer.length === 0) {
+        if (!fs.existsSync(this.tempFile)) {
             throw new Error('No audio captured to play');
         }
 
-        const ffmpegPath = process.platform === 'darwin'
-            ? '/opt/homebrew/bin/ffmpeg'
-            : 'ffmpeg';
-
         try {
-            const ffplay = spawn(ffmpegPath, [
-                '-f', 's16le',
-                '-ar', '44100',
-                '-ac', '2',
-                '-i', '-',
-                '-f', 'wav',
-                '-'
+            console.log('Playing captured audio file:', this.tempFile);
+
+            // Use play command (part of sox) for playback
+            const playProcess = spawn('/opt/homebrew/bin/play', [
+                '-q',                    // Quiet mode
+                this.tempFile,           // Input file
             ]);
 
-            // Write all captured audio to ffplay
-            for (const chunk of this.audioBuffer) {
-                ffplay.stdin.write(chunk);
-            }
-            ffplay.stdin.end();
-
-            ffplay.stderr.on('data', (data: Buffer) => {
+            playProcess.stderr.on('data', (data: Buffer) => {
                 const output = data.toString();
-                console.log('FFplay stderr:', output);
-                if (output.includes('Error')) {
-                    mainWindow?.webContents.send('ffmpeg-error', output);
+                console.log('Playback stderr:', output);
+                if (output.includes('error') || output.includes('failed')) {
+                    mainWindow?.webContents.send('audio-error', output);
                 }
             });
 
             return new Promise((resolve, reject) => {
-                ffplay.on('close', (code) => {
+                playProcess.on('close', (code) => {
                     if (code === 0) {
                         resolve({ success: true });
                     } else {
-                        reject(new Error(`FFplay exited with code ${code}`));
+                        const error = new Error(`Playback process exited with code ${code}`);
+                        mainWindow?.webContents.send('audio-error', error.message);
+                        reject(error);
                     }
                 });
 
-                ffplay.on('error', (error) => {
-                    console.error('FFplay process error:', error);
+                playProcess.on('error', (error) => {
+                    console.error('Playback process error:', error);
+                    mainWindow?.webContents.send('audio-error', error.message);
                     reject(error);
                 });
             });
         } catch (error: any) {
             console.error('Error in playCapturedAudio:', error);
+            mainWindow?.webContents.send('audio-error', error.message);
             throw error;
         }
     }
 }
 
-export const audioService = new AudioService();
-
-// Set up IPC handlers
-ipcMain.handle('start-audio-capture', async () => {
-    try {
-        return await audioService.startCapture();
-    } catch (error: any) {
-        console.error('Error starting audio capture:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('stop-audio-capture', async () => {
-    try {
-        audioService.stopCapture();
-        return { success: true };
-    } catch (error: any) {
-        console.error('Error stopping audio capture:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-ipcMain.handle('play-captured-audio', async () => {
-    try {
-        return await audioService.playCapturedAudio();
-    } catch (error: any) {
-        console.error('Error playing captured audio:', error);
-        return { success: false, error: error.message };
-    }
-}); 
+export const audioService = new AudioService(); 

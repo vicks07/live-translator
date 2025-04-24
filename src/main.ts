@@ -6,6 +6,37 @@ export let mainWindow: BrowserWindow | null = null;
 
 const isDev = process.env.NODE_ENV === 'development';
 
+// Set up IPC handlers
+function setupIpcHandlers() {
+    ipcMain.handle('start-audio-capture', async () => {
+        try {
+            return await audioService.startCapture();
+        } catch (error: any) {
+            console.error('Error starting audio capture:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('stop-audio-capture', async () => {
+        try {
+            audioService.stopCapture();
+            return { success: true };
+        } catch (error: any) {
+            console.error('Error stopping audio capture:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('play-captured-audio', async () => {
+        try {
+            return await audioService.playCapturedAudio();
+        } catch (error: any) {
+            console.error('Error playing captured audio:', error);
+            return { success: false, error: error.message };
+        }
+    });
+}
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
@@ -33,7 +64,11 @@ function createWindow() {
     });
 }
 
-app.whenReady().then(createWindow);
+// Initialize app
+app.whenReady().then(() => {
+    setupIpcHandlers();
+    createWindow();
+});
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {

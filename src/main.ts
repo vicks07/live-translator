@@ -13,7 +13,7 @@ function setupIpcHandlers() {
             return await audioService.startCapture();
         } catch (error: any) {
             console.error('Error starting audio capture:', error);
-            return { success: false, error: error.message };
+            throw error;
         }
     });
 
@@ -23,7 +23,7 @@ function setupIpcHandlers() {
             return { success: true };
         } catch (error: any) {
             console.error('Error stopping audio capture:', error);
-            return { success: false, error: error.message };
+            throw error;
         }
     });
 
@@ -32,7 +32,7 @@ function setupIpcHandlers() {
             return await audioService.playCapturedAudio();
         } catch (error: any) {
             console.error('Error playing captured audio:', error);
-            return { success: false, error: error.message };
+            throw error;
         }
     });
 }
@@ -50,14 +50,21 @@ function createWindow() {
 
     // Load the index.html file
     if (isDev) {
-        // Wait for dev server to be ready
-        setTimeout(() => {
-            mainWindow?.loadURL('http://localhost:3000');
+        mainWindow.loadURL('http://localhost:3000').then(() => {
             mainWindow?.webContents.openDevTools();
-        }, 2000);
+        }).catch(console.error);
     } else {
-        mainWindow.loadFile(path.join(__dirname, 'index.html'));
+        mainWindow.loadFile(path.join(__dirname, 'index.html'))
+            .then(() => {
+                mainWindow?.webContents.openDevTools();
+            })
+            .catch(console.error);
     }
+
+    // Wait for window to be ready
+    mainWindow.webContents.on('did-finish-load', () => {
+        console.log('Window is ready');
+    });
 
     mainWindow.on('closed', () => {
         mainWindow = null;

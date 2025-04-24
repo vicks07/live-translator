@@ -52,3 +52,4 @@ temp/
 !webpack.config.js
 
 *.wav
+secrets
